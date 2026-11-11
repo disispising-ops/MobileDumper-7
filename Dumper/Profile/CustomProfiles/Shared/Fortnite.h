@@ -1,7 +1,6 @@
 #pragma once
 
 #include "../../IProfile.h"
-#include <KittyMemoryEx/KittyMemoryEx.hpp>
 
 /**
  * @brief Fortnite Mobile (Android) profile for MobileDumper-7.
@@ -41,3 +40,4 @@ public:
     }
 
     uintptr_t GetModuleBase() const
+{
