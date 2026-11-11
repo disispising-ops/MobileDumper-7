@@ -20,11 +20,10 @@ jobs:
           chmod +x build.sh
           ./build.sh --platform android --target exe --arch arm64 || true
           ./build.sh --platform android --target lib --arch arm64 || true
+          echo "=== OUTPUT FILES ==="
+          find builds -type f 2>/dev/null
       - uses: actions/upload-artifact@v4
         with:
           name: MobileDumper7-android-arm64
-          path: |
-            build/**
-            out/**
-            bin/**
-          if-no-files-found: warn
+          path: builds/**
+          if-no-files-found: error
