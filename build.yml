@@ -1,0 +1,37 @@
+name: build-android-arm64
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: nttld/setup-ndk@v1
+        id: ndk
+        with:
+          ndk-version: r27c
+
+      - uses: seanmiddleditch/gha-setup-ninja@master
+
+      - name: Build arm64 exe + lib
+        env:
+          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+        run: |
+          chmod +x build.sh
+          ./build.sh --platform android --target exe --arch arm64 || true
+          ./build.sh --platform android --target lib --arch arm64 || true
+          echo "=== BUILD OUTPUTS ==="
+          find . -type f \( -name "MobileDumper7*" -o -name "libMobileDumper*" -o -name "*.so" \) 2>/dev/null | grep -v "/libs/" | head -30
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MobileDumper7-android-arm64
+          path: |
+            build/**
+            out/**
+            bin/**
+          if-no-files-found: warn
