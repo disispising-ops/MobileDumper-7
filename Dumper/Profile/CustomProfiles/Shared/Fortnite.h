@@ -22,24 +22,23 @@ public:
 
     uintptr_t GetGObjects() const override
     {
-        uintptr_t Base = MD7::Globals::GMemory->GetUnrealModule().GetBase();
-        if (Base == 0) return 0;
-        uintptr_t Addr = Base + GUOBJECTARRAY_OFFSET;
+        // [V-mod] Returning 0 forces MD7 to skip the hardcoded profile value
+        // and use UEAnalyzerKitty's pattern scanner instead. The old
+        // GUOBJECTARRAY_OFFSET (0x195C4000) was for an older Fortnite build
+        // and no longer matches 43.10.0 — pattern scan is more reliable
+        // across version updates. If a hardcoded value is wanted later,
+        // re-enable: `return GetUnrealModule().GetBase() + GUOBJECTARRAY_OFFSET;`
         MD7::Globals::GLogger.FmtWrite(ELogLevel::Info,
-            "FortniteProfile::GetGObjects: 0x{:x} = base 0x{:x} + 0x{:x}\n",
-            Addr, Base, (uintptr_t)GUOBJECTARRAY_OFFSET);
-        return Addr;
+            "FortniteProfile::GetGObjects: 0 (defer to pattern scanner)\n");
+        return 0;
     }
 
     uintptr_t GetGNames() const override
     {
-        uintptr_t Base = MD7::Globals::GMemory->GetUnrealModule().GetBase();
-        if (Base == 0) return 0;
-        uintptr_t Addr = Base + FNAMEPOOL_OFFSET;
+        // [V-mod] Same reasoning as GetGObjects — stale offset, defer to scan.
         MD7::Globals::GLogger.FmtWrite(ELogLevel::Info,
-            "FortniteProfile::GetGNames: 0x{:x} = base 0x{:x} + 0x{:x}\n",
-            Addr, Base, (uintptr_t)FNAMEPOOL_OFFSET);
-        return Addr;
+            "FortniteProfile::GetGNames: 0 (defer to pattern scanner)\n");
+        return 0;
     }
 
     bool ResolveGObjectsLayout(uintptr_t ObjectsPtr,
@@ -50,11 +49,14 @@ public:
         if (ObjectsPtr == 0) { if (OutError) *OutError = "null"; return false; }
 
         auto Layout = std::make_unique<FChunkedUObjectArrayLayout>();
-        Layout->Objects          = 0x10;
-        Layout->MaxElements      = 0x20;
-        Layout->NumElements      = 0x24;
-        Layout->MaxChunks        = 0x28;
-        Layout->NumChunks        = 0x2C;
+        // UE5 FChunkedFixedUObjectArray layout (Fortnite 43.x).
+        // UE4 kept FUObjectArray + inner struct; UE5 flattened it, so fields
+        // moved down 0x10. Previous values (0x10/0x20/0x24/0x28/0x2C) were UE4.
+        Layout->Objects          = 0x00;
+        Layout->MaxElements      = 0x10;
+        Layout->NumElements      = 0x14;
+        Layout->MaxChunks        = 0x18;
+        Layout->NumChunks        = 0x1C;
         Layout->ElementsPerChunk = 64 * 1024;
         Layout->FUObjectItem.Object = 0x00;
         Layout->FUObjectItem.Size   = 0x18;
