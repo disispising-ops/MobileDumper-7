@@ -11,30 +11,12 @@ class FortniteProfile : public IProfile
 public:
     FortniteProfile() = default;
 
-    // Legacy hardcoded offsets kept as documentation of a known-good older
-    // build. 43.10.0 moves them, so GetGObjects()/GetGNames() do a
-    // structural scan rather than relying on these.
+    // Legacy hardcoded offsets kept as last-ditch fallback.
     static constexpr uintptr_t GUOBJECTARRAY_OFFSET_LEGACY = 0x195C4000;
     static constexpr uintptr_t FNAMEPOOL_OFFSET_LEGACY     = 0x195C6000;
 
-    // Layout constants for Fortnite's FUObjectArray wrapper.
-    // Fortnite embeds FChunkedFixedUObjectArray inside FUObjectArray; the
-    // outer struct begins with GC bookkeeping (~0x10) so the chunked fields
-    // start at +0x10, not +0x00.
-    //   FUObjectArray {
-    //     int32 ObjFirstGCIndex;              // 0x00
-    //     int32 ObjLastNonGCIndex;            // 0x04
-    //     int32 MaxObjectsNotConsideredByGC;  // 0x08
-    //     bool  OpenForDisregardForGC;        // 0x0C (+padding)
-    //     FChunkedFixedUObjectArray ObjObjects {
-    //         FUObjectItem** Objects;         // +0x10
-    //         FUObjectItem*  PreAllocated;    // +0x18
-    //         int32          MaxElements;     // +0x20
-    //         int32          NumElements;     // +0x24
-    //         int32          MaxChunks;       // +0x28
-    //         int32          NumChunks;       // +0x2C
-    //     };
-    //   };
+    // Default FChunkedFixedUObjectArray layout wrapped inside FUObjectArray
+    // (~0x10 of GC bookkeeping before the embedded chunked struct).
     static constexpr int32 kChunkedObjectsOffset     = 0x10;
     static constexpr int32 kChunkedMaxElementsOffset = 0x20;
     static constexpr int32 kChunkedNumElementsOffset = 0x24;
@@ -67,17 +49,40 @@ public:
         return Layout;
     }
 
-    // Walk every writable, non-executable segment of libUnreal.so and look
-    // for a byte pattern that matches FUObjectArray's shape — a readable
-    // chunked-array pointer at +0x10 followed by plausible Max/Num counts
-    // at +0x20/+0x24. Modelled on PUBGMHD's FindGObjectsStructuralScan.
+    // Walk every writable, non-executable segment of libUnreal.so and ask
+    // MD7's own LayoutDetection::DetectObjectsLayout to validate each
+    // candidate root. DetectObjectsLayout knows every FUObjectArray /
+    // FChunkedFixedUObjectArray / FFixedUObjectArray variant and copes with
+    // any wrapper padding, so we don't have to guess the field offsets
+    // ourselves (my previous fixed-shape scanner missed everything).
+    //
+    // Prefilter: only probe positions whose first ~0x30 bytes contain at
+    // least one aligned, in-range userspace pointer. That skips the
+    // overwhelming majority of .bss (zeros, small ints, strings) without
+    // missing a real FUObjectArray — every variant starts with or soon has
+    // a chunk-array / items pointer.
     static uintptr_t FindGObjectsStructuralScan()
     {
-        constexpr size_t   kBlockSize   = 1024 * 1024;              // 1 MiB window
-        constexpr size_t   kHeaderBytes = kChunkedNumChunksOffset + sizeof(int32);
+        constexpr size_t   kBlockSize   = 1024 * 1024;   // 1 MiB window
+        constexpr size_t   kHeaderBytes = 0x40;
+        constexpr uint64_t kMinUserVA   = 0x1000;
         constexpr uint64_t kMaxUserVA   = 1ull << 48;
 
         std::vector<uint8_t> Block;
+        uintptr_t BestHit = 0;
+        double    BestConfidence = 0.0;
+        int       Attempts = 0, Hits = 0;
+
+        auto PeekPtrAt = [](const uint8_t* P, size_t Off) -> uintptr_t {
+            uintptr_t V = 0;
+            std::memcpy(&V, P + Off, sizeof(V));
+            return V;
+        };
+        auto LooksLikePtr = [](uintptr_t V) {
+            return static_cast<uint64_t>(V) >= kMinUserVA
+                && static_cast<uint64_t>(V) < kMaxUserVA
+                && (V & 0x7) == 0;
+        };
 
         for (const auto& Segment : MD7::Globals::GMemory->GetUnrealModule().GetSegments())
         {
@@ -95,58 +100,53 @@ public:
 
                 for (size_t InBlock = 0; InBlock + kHeaderBytes <= BlockSize; InBlock += sizeof(uintptr_t))
                 {
-                    uintptr_t ItemsPtr = 0;
-                    std::memcpy(&ItemsPtr, Block.data() + InBlock + kChunkedObjectsOffset, sizeof(ItemsPtr));
-                    if (static_cast<uint64_t>(ItemsPtr) < 0x1000 || static_cast<uint64_t>(ItemsPtr) >= kMaxUserVA)
-                        continue;
+                    // Prefilter — need an aligned userspace pointer within +0..+0x28.
+                    bool bHasPtr = false;
+                    for (size_t O = 0; O <= 0x28; O += sizeof(uintptr_t))
+                    {
+                        if (LooksLikePtr(PeekPtrAt(Block.data() + InBlock, O))) { bHasPtr = true; break; }
+                    }
+                    if (!bHasPtr) continue;
 
-                    int32 Max = 0, Num = 0, MaxChunks = 0, NumChunks = 0;
-                    std::memcpy(&Max,       Block.data() + InBlock + kChunkedMaxElementsOffset, sizeof(Max));
-                    std::memcpy(&Num,       Block.data() + InBlock + kChunkedNumElementsOffset, sizeof(Num));
-                    std::memcpy(&MaxChunks, Block.data() + InBlock + kChunkedMaxChunksOffset,   sizeof(MaxChunks));
-                    std::memcpy(&NumChunks, Block.data() + InBlock + kChunkedNumChunksOffset,   sizeof(NumChunks));
+                    const uintptr_t Root = Segment.GetStart() + Offset + InBlock;
+                    ++Attempts;
 
-                    // Shape filter — reject obviously wrong candidates
-                    // cheaply before we call the full validator.
-                    if (Num < LayoutDetection::kMinObjectCount || Num > LayoutDetection::kMaxObjectCount) continue;
-                    if (Max < Num || Max > LayoutDetection::kMaxObjectCount)                              continue;
-                    if (MaxChunks <= 0 || MaxChunks > 2048)                                               continue;
-                    if (NumChunks <= 0 || NumChunks > MaxChunks)                                          continue;
-                    const int32 ExpectedMaxChunks = (Max + kElementsPerChunk - 1) / kElementsPerChunk;
-                    if (MaxChunks != ExpectedMaxChunks)                                                   continue;
+                    LayoutDetection::FObjectsDetectionResult Det = LayoutDetection::DetectObjectsLayout(Root);
+                    if (!Det.bSuccess) continue;
 
-                    const uintptr_t Global = Segment.GetStart() + Offset + InBlock;
-                    const std::unique_ptr<FChunkedUObjectArrayLayout> Layout = MakeChunkedLayout();
-
-                    if (!LayoutDetection::TestObjectsLayout(Global, Layout.get()).bValid)
-                        continue;
-
+                    ++Hits;
                     MD7::Globals::GLogger.FmtWrite(ELogLevel::Info,
                         "FortniteProfile::FindGObjectsStructuralScan: HIT at 0x{:X} (base+0x{:X}) "
-                        "Num={} Max={} NumChunks={} MaxChunks={}\n",
-                        Global, MD7::Globals::GMemory->GetUnrealModule().AddressToOffset(Global),
-                        Num, Max, NumChunks, MaxChunks);
-                    return Global;
+                        "confidence={:.2f} — {}\n",
+                        Root,
+                        MD7::Globals::GMemory->GetUnrealModule().AddressToOffset(Root),
+                        Det.Confidence, Det.Summary);
+
+                    if (Det.Confidence >= 0.8) return Root;
+                    if (Det.Confidence > BestConfidence) { BestHit = Root; BestConfidence = Det.Confidence; }
                 }
             }
         }
 
+        if (BestHit)
+        {
+            MD7::Globals::GLogger.FmtWrite(ELogLevel::Info,
+                "FortniteProfile::FindGObjectsStructuralScan: using best hit 0x{:X} ({:.2f}), "
+                "{} hits / {} positions\n", BestHit, BestConfidence, Hits, Attempts);
+            return BestHit;
+        }
+
         MD7::Globals::GLogger.FmtWrite(ELogLevel::Info,
-            "FortniteProfile::FindGObjectsStructuralScan: no FUObjectArray-shaped region found\n");
+            "FortniteProfile::FindGObjectsStructuralScan: no valid FUObjectArray — "
+            "{} positions probed by DetectObjectsLayout, 0 hits\n", Attempts);
         return 0;
     }
 
     uintptr_t GetGObjects() const override
     {
-        // Structural scan over writable segments. Hardcoded 0x195C4000 is stale
-        // for 43.10.0, and UEAnalyzerKitty's generic pattern scan rejects
-        // every candidate for Fortnite — so we run our own shape-matcher.
         uintptr_t Found = FindGObjectsStructuralScan();
         if (Found) return Found;
 
-        // Last-ditch fallback to the legacy hardcoded offset in case the
-        // scan missed; the caller (InitObjects) will validate it and
-        // defer to UEAnalyzerKitty if this is also wrong.
         uintptr_t Base = MD7::Globals::GMemory->GetUnrealModule().GetBase();
         if (Base == 0) return 0;
         MD7::Globals::GLogger.FmtWrite(ELogLevel::Info,
@@ -157,10 +157,6 @@ public:
 
     uintptr_t GetGNames() const override
     {
-        // Return 0 so MD7 defers to UEAnalyzerKitty. Once GObjects is
-        // locked in, FNamePool is usually within a few KiB of it and the
-        // generic name scanner has better luck than it did for the
-        // object array.
         MD7::Globals::GLogger.FmtWrite(ELogLevel::Info,
             "FortniteProfile::GetGNames: 0 (defer to pattern scanner)\n");
         return 0;
