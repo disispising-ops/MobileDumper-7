@@ -136,16 +136,12 @@ public:
                         ++ShapeHits;
                         const uintptr_t Root = Segment.GetStart() + Offset + InBlock;
 
-                        // Shape matched — hand off to DetectObjectsLayout which
-                        // auto-discovers the exact field layout and item decryption
-                        // instead of trusting our variant guess.
                         ++ValidatorCalls;
                         auto Det = LayoutDetection::DetectObjectsLayout(Root);
 
                         MD7::Globals::GLogger.FmtWrite(ELogLevel::Info,
-                            "FortniteProfile::Scan: shape@0x{:X} variant(Obj=+0x{:X}) Num={} Max={} detect={} conf={:.2f} — {}\n",
-                            Root, V.Objects, Num, Max,
-                            Det.bSuccess ? 1 : 0, Det.Confidence, Det.Summary);
+                            "FortniteProfile::Scan: shape@0x{:X} Num={} Max={} detect={} conf={:.2f} — {}\n",
+                            Root, Num, Max, Det.bSuccess ? 1 : 0, Det.Confidence, Det.Summary);
 
                         if (Det.bSuccess)
                         {
@@ -157,7 +153,83 @@ public:
                             return Root;
                         }
                         if (Det.Confidence > BestConfidence) { BestHit = Root; BestConfidence = Det.Confidence; }
-                        break;  // one variant per Root is enough — don't re-probe the same address
+
+                        // === DIAGNOSTIC DUMP for high-value candidates ===
+                        // For any shape hit with Num in [1000, 100000] (plausible
+                        // real GObjects) dump the raw bytes around the Root and
+                        // chase the first-level pointer. The dump is what we'll
+                        // reverse-engineer the decryption scheme from.
+                        if (Num >= 1000 && Num <= 100000)
+                        {
+                            MD7::Globals::GLogger.FmtWrite(ELogLevel::Info,
+                                "\n=== DIAGNOSTIC: 0x{:X} (base+0x{:X}) ===\n",
+                                Root, MD7::Globals::GMemory->GetUnrealModule().AddressToOffset(Root));
+
+                            // Dump first 0x80 bytes of the FUObjectArray.
+                            uint8_t Buf[0x80] = {0};
+                            if (MD7::Globals::GMemory->ReadBytes(Root, Buf, sizeof(Buf)) == sizeof(Buf))
+                            {
+                                for (int Row = 0; Row < 8; ++Row)
+                                {
+                                    uint64_t Q0 = 0, Q1 = 0;
+                                    std::memcpy(&Q0, Buf + Row * 16,     8);
+                                    std::memcpy(&Q1, Buf + Row * 16 + 8, 8);
+                                    MD7::Globals::GLogger.FmtWrite(ELogLevel::Info,
+                                        "  +0x{:02X}: {:016X} {:016X}\n", Row * 16, Q0, Q1);
+                                }
+                            }
+
+                            // Try every plausible pointer slot in those 0x80 bytes.
+                            // For each candidate pointer, print raw, and three
+                            // candidate decryptions, and whether the decrypted
+                            // address is readable.
+                            auto& Mem = *MD7::Globals::GMemory;
+                            for (int PtrOff = 0; PtrOff <= 0x30; PtrOff += 8)
+                            {
+                                uintptr_t Raw = 0;
+                                std::memcpy(&Raw, Buf + PtrOff, 8);
+                                if (Raw == 0) continue;
+
+                                uintptr_t D1 = Raw & ~0x1020000000000000ULL;                // bit mask
+                                uintptr_t D2 = Raw & 0x0000FFFFFFFFFFFFULL;                   // low 48 bits
+                                uintptr_t D3 = Raw ^ (Raw >> 32);                            // self-xor
+                                bool R0 = Mem.IsAddressReadable(Raw);
+                                bool R1 = Mem.IsAddressReadable(D1);
+                                bool R2 = Mem.IsAddressReadable(D2);
+                                bool R3 = Mem.IsAddressReadable(D3);
+
+                                MD7::Globals::GLogger.FmtWrite(ELogLevel::Info,
+                                    "  ptr@+0x{:02X}: raw={:016X}[{}] mask={:016X}[{}] lo48={:016X}[{}] xor={:016X}[{}]\n",
+                                    PtrOff,
+                                    Raw, R0 ? 'R' : '.',
+                                    D1,  R1 ? 'R' : '.',
+                                    D2,  R2 ? 'R' : '.',
+                                    D3,  R3 ? 'R' : '.');
+
+                                // For the first readable decryption, dump 0x40
+                                // bytes to see if it points at FUObjectItem[].
+                                uintptr_t Target = R1 ? D1 : (R2 ? D2 : (R3 ? D3 : (R0 ? Raw : 0)));
+                                if (Target)
+                                {
+                                    uint8_t T[0x40] = {0};
+                                    if (Mem.ReadBytes(Target, T, sizeof(T)) == sizeof(T))
+                                    {
+                                        MD7::Globals::GLogger.FmtWrite(ELogLevel::Info,
+                                            "    follow 0x{:X}:\n", Target);
+                                        for (int Row = 0; Row < 4; ++Row)
+                                        {
+                                            uint64_t Q0 = 0, Q1 = 0;
+                                            std::memcpy(&Q0, T + Row * 16,     8);
+                                            std::memcpy(&Q1, T + Row * 16 + 8, 8);
+                                            MD7::Globals::GLogger.FmtWrite(ELogLevel::Info,
+                                                "      +0x{:02X}: {:016X} {:016X}\n", Row * 16, Q0, Q1);
+                                        }
+                                    }
+                                }
+                            }
+                            MD7::Globals::GLogger.FmtWrite(ELogLevel::Info, "=== END DIAGNOSTIC ===\n\n");
+                        }
+                        break;
                     }
                 }
             }
