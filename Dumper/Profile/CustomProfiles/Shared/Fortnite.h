@@ -235,4 +235,31 @@ public:
     {
         Settings.General.MaxFNameLen = 1024;
     }
+
+    // Fortnite packs flag bits into unused upper bits of each FUObjectItem's
+    // Object pointer. Published Fortnite offset dumps list:
+    //   objects_bad_flags  = 0x1020000000000000  (bits 52, 56)
+    //   objects_upper_mask = 0x3FFF00000000      (bits 32..45, the ARM64 VA band)
+    // ARM64 userspace pointers live at 0x0000007XXXXXXXXX, so bits 52+ are
+    // never part of a real address — they're the packed flags, and masking
+    // them off recovers the clean pointer.
+    void OverrideDecryptCallbacks(FDecryptCallbacks& Callbacks) const override
+    {
+        constexpr uint64_t kBadFlags = 0x1020000000000000ULL;
+
+        auto Decrypt = [](const FDecryptContext<uintptr_t>& Ctx) -> uintptr_t
+        {
+            uintptr_t Cleaned = Ctx.RawValue & ~kBadFlags;
+            // Sanity check — a real UObject must be in userspace and
+            // 8-byte aligned. If after masking it's still garbage,
+            // report 0 so the walker treats the slot as empty rather
+            // than following a wild pointer and crashing.
+            if (Cleaned < 0x1000 || Cleaned >= (1ULL << 48) || (Cleaned & 0x7))
+                return 0;
+            return Cleaned;
+        };
+
+        Callbacks.ChunkedObjects.FUObjectItem.Object = Decrypt;
+        Callbacks.FixedObjects.FUObjectItem.Object   = Decrypt;
+    }
 };
