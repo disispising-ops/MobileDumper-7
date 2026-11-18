@@ -136,25 +136,28 @@ public:
                         ++ShapeHits;
                         const uintptr_t Root = Segment.GetStart() + Offset + InBlock;
 
-                        // Shape matched — now run the full validator.
+                        // Shape matched — hand off to DetectObjectsLayout which
+                        // auto-discovers the exact field layout and item decryption
+                        // instead of trusting our variant guess.
                         ++ValidatorCalls;
-                        auto Layout = MakeChunkedLayout(V.Objects, V.Max, V.Num, V.MaxChunks, V.NumChunks);
-                        auto Test = LayoutDetection::TestObjectsLayout(Root, Layout.get());
+                        auto Det = LayoutDetection::DetectObjectsLayout(Root);
 
                         MD7::Globals::GLogger.FmtWrite(ELogLevel::Info,
-                            "FortniteProfile::Scan: shape@0x{:X} variant(Obj=+0x{:X}) Num={} Max={} valid={} conf={:.2f}\n",
-                            Root, V.Objects, Num, Max, Test.bValid ? 1 : 0, Test.Confidence);
+                            "FortniteProfile::Scan: shape@0x{:X} variant(Obj=+0x{:X}) Num={} Max={} detect={} conf={:.2f} — {}\n",
+                            Root, V.Objects, Num, Max,
+                            Det.bSuccess ? 1 : 0, Det.Confidence, Det.Summary);
 
-                        if (Test.bValid)
+                        if (Det.bSuccess)
                         {
                             MD7::Globals::GLogger.FmtWrite(ELogLevel::Info,
-                                "FortniteProfile::Scan: HIT at 0x{:X} (base+0x{:X}) variant(Obj=+0x{:X}, Num=+0x{:X})\n",
+                                "FortniteProfile::Scan: HIT at 0x{:X} (base+0x{:X}) — {}\n",
                                 Root,
                                 MD7::Globals::GMemory->GetUnrealModule().AddressToOffset(Root),
-                                V.Objects, V.Num);
+                                Det.Summary);
                             return Root;
                         }
-                        if (Test.Confidence > BestConfidence) { BestHit = Root; BestConfidence = Test.Confidence; }
+                        if (Det.Confidence > BestConfidence) { BestHit = Root; BestConfidence = Det.Confidence; }
+                        break;  // one variant per Root is enough — don't re-probe the same address
                     }
                 }
             }
@@ -259,7 +262,10 @@ public:
             return Cleaned;
         };
 
+        // Same mask may be applied to the chunks-array pointer too.
         Callbacks.ChunkedObjects.FUObjectItem.Object = Decrypt;
+        Callbacks.ChunkedObjects.Objects             = Decrypt;
         Callbacks.FixedObjects.FUObjectItem.Object   = Decrypt;
+        Callbacks.FixedObjects.Objects               = Decrypt;
     }
 };
